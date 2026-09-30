@@ -13,6 +13,7 @@ import sys
 from pathlib import Path
 
 from PyQt6.QtCore import (
+    QCoreApplication,
     QEasingCurve,
     QParallelAnimationGroup,
     QPoint,
@@ -25,7 +26,7 @@ from PyQt6.QtCore import (
     pyqtProperty,
     pyqtSignal,
 )
-from PyQt6.QtGui import QColor, QFont, QMovie, QPainter, QPen, QPixmap
+from PyQt6.QtGui import QColor, QFont, QMovie, QPainter, QPen, QPixmap, QScreen
 from PyQt6.QtWidgets import (
     QApplication,
     QDialog,
@@ -398,26 +399,37 @@ class GlassRootWidget(QWidget):
         self._radius = radius
         self._base = QColor(GLASS_BASE)
         self.setAutoFillBackground(False)
+        # Force opaque background to prevent transparency issues
+        self.setAttribute(Qt.WidgetAttribute.WA_OpaquePaintEvent, True)
 
     def paintEvent(self, event):
         p = QPainter(self)
         p.setRenderHint(QPainter.RenderHint.Antialiasing, True)
         p.setRenderHint(QPainter.RenderHint.TextAntialiasing, True)
-        rect = self.rect().adjusted(1, 1, -1, -1)
+        
+        # Fill entire widget with base color first (prevents transparency)
+        rect = self.rect()
+        p.fillRect(rect, self._base)
+        
+        # Now draw the glass effect layers
+        adjusted_rect = rect.adjusted(1, 1, -1, -1)
         for inset, alpha in ((0, 50), (1, 28), (2, 14)):
             p.setPen(Qt.PenStyle.NoPen)
             p.setBrush(QColor(0, 0, 0, alpha))
             p.drawRoundedRect(
-                rect.adjusted(inset, inset + 1, -inset, -inset),
+                adjusted_rect.adjusted(inset, inset + 1, -inset, -inset),
                 self._radius,
                 self._radius,
             )
-        p.setBrush(self._base)
-        p.setPen(QPen(QColor(255, 255, 255, 36), 1.0))
-        p.drawRoundedRect(rect, self._radius, self._radius)
-        p.setPen(QPen(QColor(255, 255, 255, 20), 1.0))
+        
+        # Draw border
         p.setBrush(Qt.BrushStyle.NoBrush)
-        p.drawRoundedRect(rect.adjusted(1, 1, -1, -1), self._radius - 1, self._radius - 1)
+        p.setPen(QPen(QColor(255, 255, 255, 36), 1.0))
+        p.drawRoundedRect(adjusted_rect, self._radius, self._radius)
+        
+        p.setPen(QPen(QColor(255, 255, 255, 20), 1.0))
+        p.drawRoundedRect(adjusted_rect.adjusted(1, 1, -1, -1), self._radius - 1, self._radius - 1)
+        
         p.end()
 
 
@@ -548,7 +560,6 @@ class FloatingSticker(QWidget):
 
         self.setWindowFlags(
             Qt.WindowType.FramelessWindowHint
-            | Qt.WindowType.WindowStaysOnTopHint
             | Qt.WindowType.Tool
         )
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
@@ -563,7 +574,7 @@ class FloatingSticker(QWidget):
         self.gif_label.setScaledContents(True)
         self.gif_label.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
 
-        self.movie = QMovie(self.gif_path)
+        self.movie = create_hi_dpi_movie(self.gif_path, self.width(), self.height(), self)
         if self.movie.isValid():
             speed = int(100 * (self.fps / 15.0))
             self.movie.setSpeed(max(10, min(400, speed)))
@@ -606,6 +617,17 @@ class FloatingSticker(QWidget):
     def set_sticker_size(self, w: int, h: int) -> None:
         self.resize(max(80, w), max(80, h))
         self._layout_chrome()
+        # Recreate movie with new size for proper HiDPI scaling
+        if self.movie:
+            old_path = self.movie.fileName()
+            self.movie.stop()
+            self.movie.setFileName("")
+            self.movie = create_hi_dpi_movie(old_path, self.width(), self.height(), self)
+            if self.movie.isValid():
+                speed = int(100 * (self.fps / 15.0))
+                self.movie.setSpeed(max(10, min(400, speed)))
+                self.gif_label.setMovie(self.movie)
+                self.movie.start()
         self.geometry_changed.emit(self)
 
     def _layout_chrome(self) -> None:
@@ -625,6 +647,9 @@ class FloatingSticker(QWidget):
 
     def resizeEvent(self, event):
         self._layout_chrome()
+        # Update movie scaled size on resize for HiDPI
+        if self.movie and self.movie.isValid():
+            self.movie.setScaledSize(hi_dpi_size(self.gif_label.width(), self.gif_label.height(), self))
         super().resizeEvent(event)
 
     def paintEvent(self, event):
@@ -646,7 +671,6 @@ class FloatingSticker(QWidget):
         self.handle.show()
         flags = (
             Qt.WindowType.FramelessWindowHint
-            | Qt.WindowType.WindowStaysOnTopHint
             | Qt.WindowType.Tool
         )
         self.setWindowFlags(flags)
@@ -663,7 +687,6 @@ class FloatingSticker(QWidget):
         self.handle.hide()
         flags = (
             Qt.WindowType.FramelessWindowHint
-            | Qt.WindowType.WindowStaysOnTopHint
             | Qt.WindowType.Tool
             | Qt.WindowType.WindowTransparentForInput
         )
@@ -732,9 +755,7 @@ class AnimationCard(QFrame):
         )
 
         if path.lower().endswith(".gif"):
-            self._movie = QMovie(path)
-            self._movie.setCacheMode(QMovie.CacheMode.CacheAll)
-            self._movie.setScaledSize(movie_scaled_size(128, 108, self))
+            self._movie = create_hi_dpi_movie(path, 128, 108, self)
             self.img.setMovie(self._movie)
             self._movie.start()
         else:
@@ -1043,8 +1064,17 @@ class AnimaEngineHub(QMainWindow):
         self.setObjectName("AnimaHub")
         self.setWindowTitle(APP_NAME)
         self.setFixedSize(WINDOW_W, WINDOW_H)
-        self.setWindowFlags(Qt.WindowType.FramelessWindowHint | Qt.WindowType.Window)
+        self.setWindowFlags(
+            Qt.WindowType.FramelessWindowHint
+            | Qt.WindowType.Window
+        )
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
+        
+        # Force opaque background for central widget
+        self.centralWidget().setAutoFillBackground(True)
+        palette = self.centralWidget().palette()
+        palette.setColor(palette.ColorRole.Window, GLASS_BASE)
+        self.centralWidget().setPalette(palette)
         self.setStyleSheet(STYLE_SHEET)
 
         self.library: list[dict] = load_library()
@@ -1601,9 +1631,7 @@ class AnimaEngineHub(QMainWindow):
     def _show_preview(self, path: str) -> None:
         self._clear_preview()
         if path.lower().endswith(".gif"):
-            movie = QMovie(path)
-            movie.setCacheMode(QMovie.CacheMode.CacheAll)
-            movie.setScaledSize(QSize(240, 150))
+            movie = create_hi_dpi_movie(path, 240, 150, self.preview)
             self.preview.setMovie(movie)
             movie.start()
             self._preview_movie = movie
@@ -1797,7 +1825,17 @@ class AnimaEngineHub(QMainWindow):
 
 def main() -> int:
     os.environ.setdefault("QT_ENABLE_HIGHDPI_SCALING", "1")
+    os.environ.setdefault("QT_USE_NATIVE_WINDOWS", "1")
+    
     app = QApplication(sys.argv)
+    app.setApplicationName(APP_NAME)
+    app.setApplicationVersion(APP_VERSION)
+    app.setOrganizationName(APP_NAME)
+    app.setStyle("Fusion")
+    
+    # Enable high DPI scaling
+    app.setAttribute(Qt.ApplicationAttribute.AA_EnableHighDpiScaling, True)
+    app.setAttribute(Qt.ApplicationAttribute.AA_UseHighDpiPixmaps, True)
     app.setApplicationName(APP_NAME)
     app.setApplicationVersion(APP_VERSION)
     app.setOrganizationName(APP_NAME)
