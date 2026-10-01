@@ -1908,6 +1908,34 @@ class StickaEngineHub(QMainWindow):
         self.uninstall_btn.clicked.connect(self._run_uninstall)
         c.addWidget(self.uninstall_btn)
 
+    def _run_uninstall(self) -> None:
+        """Run uninstall process."""
+        import shutil
+        import subprocess
+        
+        # Remove installation directory
+        if INSTALL_DIR.exists():
+            shutil.rmtree(INSTALL_DIR, ignore_errors=True)
+        
+        # Remove desktop shortcut
+        desktop = Path.home() / "Desktop"
+        if not desktop.exists():
+            desktop = Path(os.environ.get("USERPROFILE", str(Path.home()))) / "Desktop"
+        lnk = desktop / f"{APP_NAME}.lnk"
+        if lnk.exists():
+            lnk.unlink()
+        
+        # Show completion message
+        from PyQt6.QtWidgets import QMessageBox
+        msg = QMessageBox()
+        msg.setWindowTitle(f"{APP_NAME} - Desinstalado")
+        msg.setText(f"{APP_NAME} ha sido desinstalado correctamente.")
+        msg.setStandardButtons(QMessageBox.StandardButton.Ok)
+        msg.exec()
+        
+        # Update install button status
+        self._sync_install_button()
+
         layout.addWidget(card)
         layout.addStretch()
         return page
