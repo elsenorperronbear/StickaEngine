@@ -57,6 +57,11 @@ from PyQt6.QtWidgets import (
 APP_VERSION = "1.2.0"
 APP_NAME = "AnimaEngine"
 ACCENT = "#007AFF"
+
+# GitHub configuration for auto-updates
+GITHUB_REPO = "elsenorperronbear/StickaEngine"
+GITHUB_API_URL = f"https://api.github.com/repos/{GITHUB_REPO}/releases/latest"
+RELEASES_URL = f"https://github.com/{GITHUB_REPO}/releases"
 GLASS_BORDER = "1px solid rgba(255, 255, 255, 0.12)"
 WINDOW_W, WINDOW_H = 980, 640  # Vine-like fixed preset
 # Solid dark base — never see-through to desktop (WA_TranslucentBackground still used for round corners)
@@ -522,6 +527,46 @@ def installed_version() -> str | None:
     except (json.JSONDecodeError, OSError):
         return None
 
+
+
+def check_for_updates(current_version: str) -> dict | None:
+    """Check GitHub for newer releases."""
+    import urllib.request
+    import json
+    
+    try:
+        req = urllib.request.Request(GITHUB_API_URL, headers={"Accept": "application/vnd.github.v3+json"})
+        with urllib.request.urlopen(req, timeout=10) as response:
+            data = json.loads(response.read().decode())
+        
+        latest_version = data.get("tag_name", "").lstrip("v")
+        if not latest_version:
+            return None
+        
+        if version_tuple(latest_version) > version_tuple(current_version):
+            return {
+                "version": latest_version,
+                "url": data.get("html_url", RELEASES_URL),
+                "name": data.get("name", f"v{latest_version}"),
+                "body": data.get("body", ""),
+                "assets": [a["browser_download_url"] for a in data.get("assets", [])]
+            }
+        return None
+    except Exception as e:
+        print(f"Update check error: {e}")
+        return None
+
+
+def download_file(url: str, target_path: Path) -> bool:
+    """Download a file from URL."""
+    import urllib.request
+    try:
+        target_path.parent.mkdir(parents=True, exist_ok=True)
+        urllib.request.urlretrieve(url, str(target_path))
+        return True
+    except Exception as e:
+        print(f"Download error: {e}")
+        return False
 
 def version_tuple(v: str) -> tuple[int, ...]:
     parts = []
@@ -1345,8 +1390,14 @@ class AnimaEngineHub(QMainWindow):
 
         self._autosave_timer = QTimer(self)
         self._autosave_timer.setSingleShot(True)
-        self._autosave_timer.setInterval(450)
+        self._autosave_timer.setInterval(300)  # Guardar más frecuentemente
         self._autosave_timer.timeout.connect(self._flush_autosave)
+        
+        # Timer para guardar al mover/redimensionar stickers
+        self._sticker_autosave_timer = QTimer(self)
+        self._sticker_autosave_timer.setSingleShot(True)
+        self._sticker_autosave_timer.setInterval(500)
+        self._sticker_autosave_timer.timeout.connect(self._flush_autosave)
 
         self._build_ui()
         self._restore_window_geometry()
@@ -1395,7 +1446,8 @@ class AnimaEngineHub(QMainWindow):
             "Workshop", "Compose and remix stickers. Coming soon."
         )
         self.page_settings = self._build_settings_page()
-        for p in (self.page_library, self.page_editor, self.page_workshop, self.page_settings):
+        self.page_marketplace = self._build_marketplace_page()
+        for p in (self.page_library, self.page_editor, self.page_workshop, self.page_marketplace, self.page_settings):
             self.stack.addWidget(p)
         body.addWidget(self.stack, 1)
         root.addLayout(body, 1)
@@ -1447,11 +1499,13 @@ class AnimaEngineHub(QMainWindow):
         self.nav_library = QPushButton("  Library")
         self.nav_editor = QPushButton("  Editor")
         self.nav_workshop = QPushButton("  Workshop")
+        self.nav_marketplace = QPushButton("  Marketplace")
         self.nav_settings = QPushButton("  Settings")
         self._nav_buttons = {
             "library": self.nav_library,
             "editor": self.nav_editor,
             "workshop": self.nav_workshop,
+            "marketplace": self.nav_marketplace,
             "settings": self.nav_settings,
         }
         for key, btn in self._nav_buttons.items():
@@ -1659,6 +1713,131 @@ class AnimaEngineHub(QMainWindow):
         layout.addWidget(s, alignment=Qt.AlignmentFlag.AlignCenter)
         return page
 
+    def _build_marketplace_page(self) -> QWidget:
+        """Marketplace page with auto-update from GitHub."""
+        page = QWidget()
+        layout = QVBoxLayout(page)
+        layout.setContentsMargins(36, 28, 36, 28)
+        layout.setSpacing(16)
+
+        title = QLabel("Marketplace")
+        title.setStyleSheet("font-size: 24px; font-weight: 700;")
+        layout.addWidget(title)
+
+        subtitle = QLabel("Descarga stickers desde GitHub. Actualizaciones automáticas.")
+        subtitle.setObjectName("Muted")
+        layout.addWidget(subtitle)
+
+        # Update section
+        update_card = QFrame()
+        update_card.setObjectName("GlassCard")
+        uc = QVBoxLayout(update_card)
+        uc.setContentsMargins(20, 18, 20, 18)
+        uc.setSpacing(12)
+
+        self.check_updates_btn = QPushButton("Buscar actualizaciones")
+        self.check_updates_btn.setObjectName("LaunchButton")
+        self.check_updates_btn.setFixedHeight(40)
+        self.check_updates_btn.clicked.connect(self._check_for_app_updates)
+        uc.addWidget(self.check_updates_btn)
+
+        self.update_status = QLabel(f"Versión actual: {APP_VERSION}")
+        self.update_status.setObjectName("Muted")
+        uc.addWidget(self.update_status)
+
+        layout.addWidget(update_card)
+
+        # Marketplace stickers
+        marketplace_card = QFrame()
+        marketplace_card.setObjectName("GlassCard")
+        mc = QVBoxLayout(marketplace_card)
+        mc.setContentsMargins(20, 18, 20, 18)
+        mc.setSpacing(12)
+
+        mc_title = QLabel("Stickers disponibles")
+        mc_title.setStyleSheet("font-weight: 600;")
+        mc.addWidget(mc_title)
+
+        self.marketplace_scroll = QScrollArea()
+        self.marketplace_scroll.setWidgetResizable(True)
+        self.marketplace_content = QWidget()
+        self.marketplace_layout = QVBoxLayout(self.marketplace_content)
+        self.marketplace_layout.setSpacing(10)
+        self.marketplace_scroll.setWidget(self.marketplace_content)
+        mc.addWidget(self.marketplace_scroll)
+
+        self._load_marketplace_stickers()
+        layout.addWidget(marketplace_card)
+        layout.addStretch()
+        return page
+
+    def _check_for_app_updates(self) -> None:
+        """Check for app updates from GitHub."""
+        self.check_updates_btn.setEnabled(False)
+        self.update_status.setText("Buscando actualizaciones...")
+        QApplication.processEvents()
+
+        update_info = check_for_updates(APP_VERSION)
+        
+        if update_info:
+            self.update_status.setText(f"Nueva versión: {update_info['version']} - {update_info['name']}")
+            from PyQt6.QtWidgets import QMessageBox
+            msg = QMessageBox()
+            msg.setWindowTitle(f"{APP_NAME} - Actualización")
+            msg.setText(f"Versión {update_info['version']} disponible\n{update_info.get('body', '')[:100]}...")
+            msg.setStandardButtons(QMessageBox.StandardButton.Ok)
+            msg.setStandardButtons(QMessageBox.StandardButton.Ok)
+            msg.exec()
+        else:
+            self.update_status.setText(f"Versión actual: {APP_VERSION} (última)")
+        
+        self.check_updates_btn.setEnabled(True)
+
+    def _load_marketplace_stickers(self) -> None:
+        """Load marketplace stickers (placeholder for now)."""
+        while self.marketplace_layout.count():
+            item = self.marketplace_layout.takeAt(0)
+            if item and item.widget():
+                item.widget().deleteLater()
+
+        # Placeholder marketplace items
+        marketplace_items = [
+            {"name": "iOS Pack", "author": "Team", "desc": "Stickers estilo iOS"},
+            {"name": "Animals", "author": "Community", "desc": "Animales divertidos"},
+            {"name": "Memes", "author": "Community", "desc": "Pack de memes"},
+        ]
+
+        for item in marketplace_items:
+            card = QFrame()
+            card.setObjectName("GlassCard")
+            card.setFixedHeight(60)
+            cl = QHBoxLayout(card)
+            cl.setContentsMargins(12, 8, 12, 8)
+            
+            info = QVBoxLayout()
+            name_label = QLabel(item["name"])
+            name_label.setStyleSheet("font-weight: 600;")
+            desc_label = QLabel(item["desc"])
+            desc_label.setObjectName("Muted")
+            desc_label.setStyleSheet("font-size: 11px;")
+            info.addWidget(name_label)
+            info.addWidget(desc_label)
+            
+            cl.addLayout(info)
+            cl.addStretch()
+            
+            author_label = QLabel(f"by {item['author']}")
+            author_label.setObjectName("Muted")
+            author_label.setStyleSheet("font-size: 11px;")
+            cl.addWidget(author_label)
+            
+            download_btn = QPushButton("GET")
+            download_btn.setObjectName("AddCapsule")
+            download_btn.setFixedSize(60, 30)
+            cl.addWidget(download_btn)
+            
+            self.marketplace_layout.addWidget(card)
+
     def _build_settings_page(self) -> QWidget:
         page = QWidget()
         layout = QVBoxLayout(page)
@@ -1799,7 +1978,9 @@ class AnimaEngineHub(QMainWindow):
         self._autosave_timer.start()
 
     def _flush_autosave(self) -> None:
+        """Save all state: library, floats, window geometry, and settings."""
         save_library(self.library)
+        
         floats_state = []
         for s in self.active_floats:
             g = s.geometry()
@@ -1812,9 +1993,20 @@ class AnimaEngineHub(QMainWindow):
                 "w": g.width(),
                 "h": g.height(),
             })
+        
+        # Guardar geometría de la ventana
+        geo = self.geometry()
+        window_geo = {
+            "x": geo.x(),
+            "y": geo.y(),
+            "width": geo.width(),
+            "height": geo.height()
+        }
+        
         self.session = {
             "stickers_active": self.stickers_active,
             "floats": floats_state,
+            "window_geometry": window_geo,
         }
         save_session(self.session)
 
@@ -1937,6 +2129,11 @@ class AnimaEngineHub(QMainWindow):
             sticker.hide()
         self.active_floats.append(sticker)
         self.focused_float = sticker
+        
+        # Conectar señales de cambio para auto-guardado
+        sticker.geometry_changed.connect(self._on_sticker_geometry_changed)
+        sticker.mode_changed.connect(self.schedule_autosave)
+        
         self._refresh_floats_list()
         self._refresh_editor()
         self.schedule_autosave()
@@ -1994,6 +2191,10 @@ class AnimaEngineHub(QMainWindow):
         self.schedule_autosave()
 
     # -- editor -------------------------------------------------------------
+
+    def _on_sticker_geometry_changed(self, sticker):
+        """Trigger autosave when sticker geometry changes."""
+        self._sticker_autosave_timer.start()
 
     def _refresh_editor(self) -> None:
         if not self.focused_float and self.active_floats:
