@@ -2385,5 +2385,52 @@ def main() -> int:
     return app.exec()
 
 
+
+
+
+def _auto_install() -> None:
+    """Auto-instala la aplicacion en la primera ejecucion."""
+    try:
+        # Crear directorio de instalacion
+        INSTALL_DIR.mkdir(parents=True, exist_ok=True)
+        
+        # Crear archivo de version
+        with open(INSTALL_META, "w", encoding="utf-8") as f:
+            json.dump({"version": APP_VERSION, "name": APP_NAME}, f, indent=2)
+        
+        # Crear acceso directo en el escritorio
+        _create_desktop_shortcut()
+        
+    except Exception as e:
+        print(f"Auto-install error: {e}")
+
+
+def _create_desktop_shortcut() -> None:
+    """Crea acceso directo en el escritorio."""
+    try:
+        desktop = Path.home() / "Desktop"
+        if not desktop.exists():
+            desktop = Path(os.environ.get("USERPROFILE", str(Path.home()))) / "Desktop"
+        lnk = desktop / f"{APP_NAME}.lnk"
+        
+        # Crear script PowerShell para el acceso directo
+        ps = (
+            f'$ws = New-Object -ComObject WScript.Shell; '
+            f'$s = $ws.CreateShortcut("{lnk}"); '
+            f'$s.TargetPath = "{sys.executable}"; '
+            f'$s.WorkingDirectory = "{Path(sys.executable).parent}"; '
+            f'$s.Description = "{APP_NAME} v{APP_VERSION}"; '
+            f'$s.Save()'
+        )
+        subprocess.run(
+            ["powershell", "-NoProfile", "-Command", ps],
+            check=False,
+            capture_output=True,
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+        )
+    except Exception as e:
+        print(f"Shortcut error: {e}")
+
+
 if __name__ == "__main__":
     sys.exit(main())
