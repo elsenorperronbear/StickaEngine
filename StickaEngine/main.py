@@ -1378,11 +1378,13 @@ class StickaEngineHub(QMainWindow):
         )
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
         
-        # Force opaque background for central widget
-        self.centralWidget().setAutoFillBackground(True)
-        palette = self.centralWidget().palette()
+        # Create and set central widget with opaque background
+        central_widget = QWidget()
+        central_widget.setAutoFillBackground(True)
+        palette = central_widget.palette()
         palette.setColor(palette.ColorRole.Window, GLASS_BASE)
-        self.centralWidget().setPalette(palette)
+        central_widget.setPalette(palette)
+        self.setCentralWidget(central_widget)
         self.setStyleSheet(STYLE_SHEET)
 
         self.library: list[dict] = load_library()
