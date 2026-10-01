@@ -2334,13 +2334,11 @@ def main() -> int:
     app.setOrganizationName(APP_NAME)
     app.setStyle("Fusion")
     
-    # Enable high DPI scaling
-    app.setAttribute(Qt.ApplicationAttribute.AA_EnableHighDpiScaling, True)
-    app.setAttribute(Qt.ApplicationAttribute.AA_UseHighDpiPixmaps, True)
-    app.setApplicationName(APP_NAME)
-    app.setApplicationVersion(APP_VERSION)
-    app.setOrganizationName(APP_NAME)
-    app.setStyle("Fusion")
+    # Enable high DPI scaling (compatible with PyQt6)
+    # For PyQt6, we use environment variables and Qt flags
+    os.environ["QT_ENABLE_HIGHDPI_SCALING"] = "1"
+    os.environ["QT_USE_NATIVE_WINDOWS"] = "1"
+    
     ensure_data_dir()
     # Verificar si está instalado
     if not _is_installed():
