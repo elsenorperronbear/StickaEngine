@@ -8,12 +8,14 @@ from __future__ import annotations
 import json
 import os
 import shutil
+import tempfile
 import subprocess
 import sys
 from pathlib import Path
 
 from PyQt6.QtCore import (
     QCoreApplication,
+    QObject,
     QEasingCurve,
     QParallelAnimationGroup,
     QPoint,
@@ -26,7 +28,7 @@ from PyQt6.QtCore import (
     pyqtProperty,
     pyqtSignal,
 )
-from PyQt6.QtGui import QColor, QFont, QMovie, QPainter, QPen, QPixmap, QScreen
+from PyQt6.QtGui import QColor, QFont, QIcon, QImage, QMovie, QPainter, QPen, QPixmap, QScreen
 from PyQt6.QtWidgets import (
     QApplication,
     QDialog,
@@ -338,6 +340,109 @@ def save_session(state: dict) -> None:
 
 
 
+
+def is_apng(path: str) -> bool:
+    """Check if a file is an APNG (Animated PNG)."""
+    try:
+        if not path.lower().endswith('.png'):
+            return False
+        # Try with Pillow first
+        try:
+            from PIL import Image
+            with Image.open(path) as img:
+                return getattr(img, 'is_animated', False) and getattr(img, 'n_frames', 1) > 1
+        except ImportError:
+            pass
+        # Fallback: check for acTL chunk
+        with open(path, 'rb') as f:
+            header = f.read(8)
+            if header != b'\x89PNG\r\n\x1a\n':
+                return False
+            while True:
+                chunk_length_bytes = f.read(4)
+                if len(chunk_length_bytes) < 4:
+                    break
+                chunk_length = int.from_bytes(chunk_length_bytes, 'big')
+                chunk_type = f.read(4)
+                if chunk_type == b'acTL':
+                    return True
+                if chunk_length == 0:
+                    break
+                f.read(chunk_length + 4)
+        return False
+    except (OSError, IOError):
+        return False
+
+
+class APNGMovie(QObject):
+    """Custom movie class for APNG animation using Pillow."""
+    frame_ready = pyqtSignal(QPixmap)
+    
+    def __init__(self, path: str, parent=None):
+        super().__init__(parent)
+        self.path = path
+        self.frames = []
+        self.current_frame = 0
+        self.fps = 15
+        self._load_frames()
+        self.timer = QTimer(self)
+        self.timer.timeout.connect(self.next_frame)
+    
+    def _load_frames(self):
+        """Load all frames from APNG using Pillow."""
+        try:
+            from PIL import Image
+            with Image.open(self.path) as img:
+                self.fps = getattr(img, 'info', {}).get('duration', 100)
+                if self.fps == 0:
+                    self.fps = 15
+                else:
+                    self.fps = 1000 / self.fps  # Convert ms to fps approximation
+                
+                n_frames = getattr(img, 'n_frames', 1)
+                for frame_idx in range(n_frames):
+                    img.seek(frame_idx)
+                    # Convert PIL Image to QPixmap
+                    if img.mode != 'RGBA':
+                        img = img.convert('RGBA')
+                    data = img.tobytes('raw', 'RGBA')
+                    qimg = QImage(data, img.width, img.height, QImage.Format.Format_RGBA8888)
+                    pixmap = QPixmap.fromImage(qimg)
+                    self.frames.append(pixmap)
+        except (ImportError, OSError):
+            self.frames = []
+    
+    def start(self):
+        """Start the animation."""
+        if self.frames:
+            self.current_frame = 0
+            frame_duration = int(1000 / min(60, max(1, self.fps)))
+            self.timer.start(frame_duration)
+            self.frame_ready.emit(self.frames[0])
+    
+    def stop(self):
+        """Stop the animation."""
+        self.timer.stop()
+    
+    def next_frame(self):
+        """Emit next frame."""
+        if self.frames:
+            self.current_frame = (self.current_frame + 1) % len(self.frames)
+            self.frame_ready.emit(self.frames[self.current_frame])
+    
+    def isValid(self) -> bool:
+        """Check if movie is valid."""
+        return len(self.frames) > 0
+    
+    def setSpeed(self, speed: int):
+        """Set animation speed (percentage)."""
+        if speed <= 0:
+            self.timer.stop()
+        else:
+            frame_duration = int(1000 / min(60, max(1, self.fps * speed / 100)))
+            if self.timer.isActive():
+                self.timer.start(frame_duration)
+
 def is_apng(path: str) -> bool:
     """Check if a file is an APNG (Animated PNG) by checking for acTL chunk."""
     try:
@@ -363,6 +468,34 @@ def is_apng(path: str) -> bool:
         return False
     except (OSError, IOError):
         return False
+
+
+
+def create_default_icon(path: Path) -> bool:
+    """Create a simple default icon for the app."""
+    try:
+        from PIL import Image, ImageDraw
+        # Create 32x32 icon with blue circle
+        img = Image.new('RGBA', (32, 32), (0, 0, 0, 0))
+        draw = ImageDraw.Draw(img)
+        draw.ellipse((4, 4, 28, 28), fill=(0, 122, 255, 255))
+        img.save(str(path))
+        return True
+    except ImportError:
+        return False
+
+
+
+def create_spring_animation(target: QObject, property_name: bytes, start_value, end_value, duration: int = 300, parent=None) -> QPropertyAnimation:
+    """Create a spring-like animation with bounce effect."""
+    anim = QPropertyAnimation(target, property_name, parent)
+    anim.setDuration(duration)
+    anim.setStartValue(start_value)
+    anim.setEndValue(end_value)
+    # Use OutBack easing for spring effect
+    anim.setEasingCurve(QEasingCurve.Type.OutBack)
+    anim.setKeyValueAt(0.5, end_value * 1.1)  # Overshoot
+    return anim
 
 
 def apply_soft_shadow(widget: QWidget, blur: int = 28, dy: int = 8) -> None:
@@ -603,14 +736,24 @@ class FloatingSticker(QWidget):
         self.gif_label.setScaledContents(True)
         self.gif_label.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
 
-        # Handle APNG files - show as static image for now
+        # Handle APNG files with APNGMovie
         if is_apng(self.gif_path):
-            pix = hi_dpi_pixmap(self.gif_path, self.width(), self.height(), self)
-            if not pix.isNull():
-                self.gif_label.setPixmap(pix)
-                self.gif_label.setToolTip("APNG (Animated PNG) - Displayed as static")
-            self.movie = QMovie()  # Dummy movie
+            self.apng_movie = APNGMovie(self.gif_path, self)
+            if self.apng_movie.isValid():
+                self.apng_movie.frame_ready.connect(self.gif_label.setPixmap)
+                speed = int(100 * (self.fps / 15.0))
+                self.apng_movie.setSpeed(max(10, min(400, speed)))
+                self.apng_movie.start()
+                self.gif_label.setToolTip("APNG (Animated PNG)")
+            else:
+                # Fallback to static image
+                pix = hi_dpi_pixmap(self.gif_path, self.width(), self.height(), self)
+                if not pix.isNull():
+                    self.gif_label.setPixmap(pix)
+                    self.gif_label.setToolTip("APNG (Animated PNG) - Displayed as static")
+            self.movie = QMovie()  # Dummy for compatibility
         else:
+            self.apng_movie = None
             self.movie = create_hi_dpi_movie(self.gif_path, self.width(), self.height(), self)
             if self.movie.isValid():
                 speed = int(100 * (self.fps / 15.0))
@@ -658,7 +801,10 @@ class FloatingSticker(QWidget):
 
     def set_fps(self, fps: int) -> None:
         self.fps = max(1, min(60, fps))
-        if self.movie and self.movie.isValid():
+        if hasattr(self, 'apng_movie') and self.apng_movie and self.apng_movie.isValid():
+            speed = int(100 * (self.fps / 15.0))
+            self.apng_movie.setSpeed(max(10, min(400, speed)))
+        elif self.movie and self.movie.isValid():
             speed = int(100 * (self.fps / 15.0))
             self.movie.setSpeed(max(10, min(400, speed)))
 
@@ -806,6 +952,8 @@ class AnimationCard(QFrame):
         self.name = name
         self.path = path
         self._movie: QMovie | None = None
+        self._apng_movie = None
+        self._loaded = False  # Lazy loading flag
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(12, 12, 12, 12)
@@ -817,22 +965,15 @@ class AnimationCard(QFrame):
         self.img.setStyleSheet(
             "background-color: rgba(0,0,0,0.4); border-radius: 14px;"
         )
+        
+        # Placeholder image
+        placeholder = QPixmap(128, 108)
+        placeholder.fill(QColor(0, 0, 0, 100))
+        self.img.setPixmap(placeholder)
 
-        if path.lower().endswith(".gif"):
-            self._movie = create_hi_dpi_movie(path, 128, 108, self)
-            self.img.setMovie(self._movie)
-            self._movie.start()
-        elif is_apng(path):
-            # APNG detected - show first frame as static image
-            scaled = hi_dpi_pixmap(path, 128, 108, self)
-            if not scaled.isNull():
-                self.img.setPixmap(scaled)
-                # Add APNG indicator
-                self.img.setToolTip("APNG (Animated PNG) - Displayed as static")
-        else:
-            scaled = hi_dpi_pixmap(path, 128, 108, self)
-            if not scaled.isNull():
-                self.img.setPixmap(scaled)
+        # Store path for lazy loading
+        self._path = path
+        self._name = name
 
         self.name_label = QLabel(name)
         self.name_label.setObjectName("Muted")
@@ -847,6 +988,44 @@ class AnimationCard(QFrame):
         self.setProperty("selected", "true" if selected else "false")
         self.style().unpolish(self)
         self.style().polish(self)
+        
+        # Lazy load when selected
+        if selected and not self._loaded:
+            self._load_content()
+    
+    def _load_content(self) -> None:
+        """Lazy load the actual content (GIF, APNG, or image)."""
+        if self._loaded:
+            return
+        self._loaded = True
+        
+        path = self._path
+        if path.lower().endswith(".gif"):
+            self._movie = create_hi_dpi_movie(path, 128, 108, self)
+            if self._movie.isValid():
+                self.img.setMovie(self._movie)
+                self._movie.start()
+        elif is_apng(path):
+            self._apng_movie = APNGMovie(path, self)
+            if self._apng_movie.isValid():
+                self._apng_movie.frame_ready.connect(self.img.setPixmap)
+                self._apng_movie.start()
+                self.img.setToolTip("APNG (Animated PNG)")
+            else:
+                scaled = hi_dpi_pixmap(path, 128, 108, self)
+                if not scaled.isNull():
+                    self.img.setPixmap(scaled)
+                    self.img.setToolTip("APNG (Animated PNG) - Displayed as static")
+        else:
+            scaled = hi_dpi_pixmap(path, 128, 108, self)
+            if not scaled.isNull():
+                self.img.setPixmap(scaled)
+    
+    def showEvent(self, event):
+        """Lazy load when card becomes visible."""
+        if not self._loaded:
+            self._load_content()
+        super().showEvent(event)
 
     def mousePressEvent(self, event):
         if event.button() == Qt.MouseButton.LeftButton:
@@ -867,10 +1046,21 @@ class InstallerDialog(QDialog):
         super().__init__(parent)
         self.setObjectName("InstallerDlg")
         self.setWindowTitle(f"{APP_NAME} Installer")
-        self.setFixedSize(440, 340)
+        self.setFixedSize(480, 400)
         self.setWindowFlags(Qt.WindowType.FramelessWindowHint | Qt.WindowType.Dialog)
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
         self.setStyleSheet(STYLE_SHEET)
+        
+        # Try to set window icon
+        try:
+            icon_path = _bundle_dir() / "icon.png"
+            if not icon_path.exists():
+                icon_path = Path(tempfile.gettempdir()) / "animaengine_icon.png"
+                create_default_icon(icon_path)
+            if icon_path.exists():
+                self.setWindowIcon(QIcon(str(icon_path)))
+        except Exception:
+            pass
         self._drag = QPoint()
         self._result_msg = ""
         self._opened = False
@@ -1179,15 +1369,19 @@ class AnimaEngineHub(QMainWindow):
         self._select_tab("library")
         self._sync_install_button()
 
-        # Fade-in hub
+        # Spring animation for hub
         self._opacity = QGraphicsOpacityEffect(self.centralWidget())
         self.centralWidget().setGraphicsEffect(self._opacity)
         self._opacity.setOpacity(0.0)
+        
+        # Scale animation
+        self._scale_effect = QGraphicsOpacityEffect(self.centralWidget())
+        
         fade = QPropertyAnimation(self._opacity, b"opacity", self)
-        fade.setDuration(380)
+        fade.setDuration(400)
         fade.setStartValue(0.0)
         fade.setEndValue(1.0)
-        fade.setEasingCurve(QEasingCurve.Type.OutCubic)
+        fade.setEasingCurve(QEasingCurve.Type.OutBack)  # Spring effect
         fade.start()
         self._boot_fade = fade
 
@@ -1525,6 +1719,14 @@ class AnimaEngineHub(QMainWindow):
         self.install_status.setStyleSheet("font-size: 11px;")
         self.install_status.setWordWrap(True)
         c.addWidget(self.install_status)
+
+        # Add uninstall button
+        c.addSpacing(12)
+        self.uninstall_btn = QPushButton("Desinstalar")
+        self.uninstall_btn.setObjectName("DangerBtn")
+        self.uninstall_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.uninstall_btn.clicked.connect(self._run_uninstall)
+        c.addWidget(self.uninstall_btn)
 
         layout.addWidget(card)
         layout.addStretch()
