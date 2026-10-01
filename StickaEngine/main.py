@@ -336,6 +336,35 @@ def save_session(state: dict) -> None:
         json.dump(state, fh, indent=2, ensure_ascii=False)
 
 
+
+
+def is_apng(path: str) -> bool:
+    """Check if a file is an APNG (Animated PNG) by checking for acTL chunk."""
+    try:
+        if not path.lower().endswith('.png'):
+            return False
+        with open(path, 'rb') as f:
+            header = f.read(8)
+            # Check PNG magic bytes
+            if header != b'\x89PNG\r\n\x1a\n':
+                return False
+            # Look for acTL chunk (APNG signature)
+            while True:
+                chunk_length_bytes = f.read(4)
+                if len(chunk_length_bytes) < 4:
+                    break
+                chunk_length = int.from_bytes(chunk_length_bytes, 'big')
+                chunk_type = f.read(4)
+                if chunk_type == b'acTL':
+                    return True
+                if chunk_length == 0:
+                    break
+                f.read(chunk_length + 4)  # Skip data and CRC
+        return False
+    except (OSError, IOError):
+        return False
+
+
 def apply_soft_shadow(widget: QWidget, blur: int = 28, dy: int = 8) -> None:
     """Drop-shadow for solid surfaces only — avoid on translucent glass roots."""
     effect = QGraphicsDropShadowEffect(widget)
@@ -574,12 +603,20 @@ class FloatingSticker(QWidget):
         self.gif_label.setScaledContents(True)
         self.gif_label.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
 
-        self.movie = create_hi_dpi_movie(self.gif_path, self.width(), self.height(), self)
-        if self.movie.isValid():
-            speed = int(100 * (self.fps / 15.0))
-            self.movie.setSpeed(max(10, min(400, speed)))
-            self.gif_label.setMovie(self.movie)
-            self.movie.start()
+        # Handle APNG files - show as static image for now
+        if is_apng(self.gif_path):
+            pix = hi_dpi_pixmap(self.gif_path, self.width(), self.height(), self)
+            if not pix.isNull():
+                self.gif_label.setPixmap(pix)
+                self.gif_label.setToolTip("APNG (Animated PNG) - Displayed as static")
+            self.movie = QMovie()  # Dummy movie
+        else:
+            self.movie = create_hi_dpi_movie(self.gif_path, self.width(), self.height(), self)
+            if self.movie.isValid():
+                speed = int(100 * (self.fps / 15.0))
+                self.movie.setSpeed(max(10, min(400, speed)))
+                self.gif_label.setMovie(self.movie)
+                self.movie.start()
 
         self.chrome = QFrame(self)
         self.chrome.setObjectName("FloatChrome")
@@ -607,6 +644,17 @@ class FloatingSticker(QWidget):
         self.handle = ResizeHandle(self)
         self._layout_chrome()
         self._apply_edit_chrome()
+        
+        # Animación de aparición
+        self._opacity_effect = QGraphicsOpacityEffect(self)
+        self.setGraphicsEffect(self._opacity_effect)
+        self._opacity_effect.setOpacity(0.0)
+        
+        self._fade_in_anim = QPropertyAnimation(self._opacity_effect, b"opacity", self)
+        self._fade_in_anim.setDuration(300)
+        self._fade_in_anim.setStartValue(0.0)
+        self._fade_in_anim.setEndValue(1.0)
+        self._fade_in_anim.setEasingCurve(QEasingCurve.Type.OutCubic)
 
     def set_fps(self, fps: int) -> None:
         self.fps = max(1, min(60, fps))
@@ -698,6 +746,11 @@ class FloatingSticker(QWidget):
 
     def enter_edit_mode(self) -> None:
         self._apply_edit_chrome()
+    
+    def showEvent(self, event):
+        if self._opacity_effect.opacity() == 0.0:
+            self._fade_in_anim.start()
+        super().showEvent(event)
 
     def mousePressEvent(self, event):
         if self.mode != "edit":
@@ -720,11 +773,22 @@ class FloatingSticker(QWidget):
         super().mouseReleaseEvent(event)
 
     def closeEvent(self, event):
-        if self.movie:
-            self.movie.stop()
-            self.movie.setFileName("")
-        self.closed.emit(self)
-        super().closeEvent(event)
+        fade_out = QPropertyAnimation(self._opacity_effect, b"opacity", self)
+        fade_out.setDuration(200)
+        fade_out.setStartValue(self._opacity_effect.opacity())
+        fade_out.setEndValue(0.0)
+        fade_out.setEasingCurve(QEasingCurve.Type.InCubic)
+        
+        def _finish_close():
+            if self.movie:
+                self.movie.stop()
+                self.movie.setFileName("")
+            self.closed.emit(self)
+            super(FloatingSticker, self).closeEvent(event)
+        
+        fade_out.finished.connect(_finish_close)
+        fade_out.start()
+        event.ignore()
 
 
 # ---------------------------------------------------------------------------
@@ -758,6 +822,13 @@ class AnimationCard(QFrame):
             self._movie = create_hi_dpi_movie(path, 128, 108, self)
             self.img.setMovie(self._movie)
             self._movie.start()
+        elif is_apng(path):
+            # APNG detected - show first frame as static image
+            scaled = hi_dpi_pixmap(path, 128, 108, self)
+            if not scaled.isNull():
+                self.img.setPixmap(scaled)
+                # Add APNG indicator
+                self.img.setToolTip("APNG (Animated PNG) - Displayed as static")
         else:
             scaled = hi_dpi_pixmap(path, 128, 108, self)
             if not scaled.isNull():
@@ -1079,6 +1150,7 @@ class AnimaEngineHub(QMainWindow):
 
         self.library: list[dict] = load_library()
         self.session = load_session()
+        self._window_geometry = self._load_window_geometry()
         self.cards: list[AnimationCard] = []
         self.selected_card: AnimationCard | None = None
         self.active_floats: list[FloatingSticker] = []
@@ -1102,6 +1174,7 @@ class AnimaEngineHub(QMainWindow):
         self._autosave_timer.timeout.connect(self._flush_autosave)
 
         self._build_ui()
+        self._restore_window_geometry()
         self._rebuild_grid()
         self._select_tab("library")
         self._sync_install_button()
@@ -1810,7 +1883,33 @@ class AnimaEngineHub(QMainWindow):
             self.move(event.globalPosition().toPoint() - self._drag_pos)
             event.accept()
 
+    def _load_window_geometry(self) -> dict:
+        """Cargar posición y tamaño de la ventana desde la sesión."""
+        try:
+            if "window_geometry" in self.session:
+                return self.session["window_geometry"]
+        except (KeyError, TypeError):
+            pass
+        return {"x": 100, "y": 100, "width": WINDOW_W, "height": WINDOW_H}
+
+    def _save_window_geometry(self) -> None:
+        """Guardar posición y tamaño de la ventana en la sesión."""
+        geo = self.geometry()
+        self.session["window_geometry"] = {
+            "x": geo.x(),
+            "y": geo.y(),
+            "width": geo.width(),
+            "height": geo.height()
+        }
+        save_session(self.session)
+
+    def _restore_window_geometry(self) -> None:
+        """Restaurar posición y tamaño de la ventana."""
+        geo = self._window_geometry
+        self.setGeometry(geo["x"], geo["y"], geo["width"], geo["height"])
+
     def closeEvent(self, event):
+        self._save_window_geometry()
         self._flush_autosave()
         for sticker in list(self.active_floats):
             if sticker.movie:
