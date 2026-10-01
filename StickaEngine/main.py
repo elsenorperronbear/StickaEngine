@@ -443,33 +443,6 @@ class APNGMovie(QObject):
             if self.timer.isActive():
                 self.timer.start(frame_duration)
 
-def is_apng(path: str) -> bool:
-    """Check if a file is an APNG (Animated PNG) by checking for acTL chunk."""
-    try:
-        if not path.lower().endswith('.png'):
-            return False
-        with open(path, 'rb') as f:
-            header = f.read(8)
-            # Check PNG magic bytes
-            if header != b'\x89PNG\r\n\x1a\n':
-                return False
-            # Look for acTL chunk (APNG signature)
-            while True:
-                chunk_length_bytes = f.read(4)
-                if len(chunk_length_bytes) < 4:
-                    break
-                chunk_length = int.from_bytes(chunk_length_bytes, 'big')
-                chunk_type = f.read(4)
-                if chunk_type == b'acTL':
-                    return True
-                if chunk_length == 0:
-                    break
-                f.read(chunk_length + 4)  # Skip data and CRC
-        return False
-    except (OSError, IOError):
-        return False
-
-
 
 def create_default_icon(path: Path) -> bool:
     """Create a simple default icon for the app."""
@@ -485,17 +458,6 @@ def create_default_icon(path: Path) -> bool:
         return False
 
 
-
-def create_spring_animation(target: QObject, property_name: bytes, start_value, end_value, duration: int = 300, parent=None) -> QPropertyAnimation:
-    """Create a spring-like animation with bounce effect."""
-    anim = QPropertyAnimation(target, property_name, parent)
-    anim.setDuration(duration)
-    anim.setStartValue(start_value)
-    anim.setEndValue(end_value)
-    # Use OutBack easing for spring effect
-    anim.setEasingCurve(QEasingCurve.Type.OutBack)
-    anim.setKeyValueAt(0.5, end_value * 1.1)  # Overshoot
-    return anim
 
 
 def apply_soft_shadow(widget: QWidget, blur: int = 28, dy: int = 8) -> None:
@@ -522,9 +484,32 @@ def hi_dpi_pixmap(path: str, w: int, h: int, widget: QWidget | None = None) -> Q
     return scaled
 
 
-def movie_scaled_size(w: int, h: int, widget: QWidget | None = None) -> QSize:
-    dpr = widget.devicePixelRatioF() if widget else 1.0
+def get_device_pixel_ratio(widget: QWidget | None = None) -> float:
+    """Get device pixel ratio for HiDPI scaling."""
+    if widget:
+        return widget.devicePixelRatioF()
+    from PyQt6.QtGui import QScreen
+    from PyQt6.QtCore import QCoreApplication
+    screen = QCoreApplication.primaryScreen()
+    if screen:
+        return screen.devicePixelRatio()
+    return 1.0
+
+def hi_dpi_size(w: int, h: int, widget: QWidget | None = None) -> QSize:
+    """Scale size for HiDPI displays."""
+    dpr = get_device_pixel_ratio(widget)
     return QSize(max(1, int(w * dpr)), max(1, int(h * dpr)))
+
+def create_hi_dpi_movie(path: str, w: int, h: int, widget: QWidget | None = None) -> QMovie:
+    """Create a QMovie with proper HiDPI scaling."""
+    movie = QMovie(path)
+    if movie.isValid():
+        size = hi_dpi_size(w, h, widget)
+        movie.setScaledSize(size)
+        movie.setCacheMode(QMovie.CacheMode.CacheAll)
+        movie.setSpeed(100)
+    return movie
+
 
 
 def installed_version() -> str | None:
@@ -1373,9 +1358,6 @@ class AnimaEngineHub(QMainWindow):
         self._opacity = QGraphicsOpacityEffect(self.centralWidget())
         self.centralWidget().setGraphicsEffect(self._opacity)
         self._opacity.setOpacity(0.0)
-        
-        # Scale animation
-        self._scale_effect = QGraphicsOpacityEffect(self.centralWidget())
         
         fade = QPropertyAnimation(self._opacity, b"opacity", self)
         fade.setDuration(400)
