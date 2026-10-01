@@ -1,5 +1,5 @@
 """
-AnimaEngine — Desktop sticker / GIF hub
+StickaEngine — Desktop sticker / GIF hub
 Glassmorphism UI (iOS 28 / visionOS) · PyQt6
 """
 
@@ -54,8 +54,8 @@ from PyQt6.QtWidgets import (
 # Constants
 # ---------------------------------------------------------------------------
 
-APP_VERSION = "1.2.0"
-APP_NAME = "AnimaEngine"
+APP_VERSION = "1.0.0"
+APP_NAME = "StickaEngine"
 ACCENT = "#007AFF"
 
 # GitHub configuration for auto-updates
@@ -92,11 +92,28 @@ STATE_FILE = DATA_DIR / "session.json"
 INSTALL_DIR = Path(os.environ.get("LOCALAPPDATA", Path.home() / "AppData" / "Local")) / APP_NAME / "App"
 INSTALL_META = INSTALL_DIR / "version.json"
 
+
+def _is_installed() -> bool:
+    """Check if the application is properly installed."""
+    if _is_frozen():
+        # Running from PyInstaller bundle, always allow
+        return True
+    # Check if INSTALL_META exists with correct version
+    if INSTALL_META.exists():
+        try:
+            with open(INSTALL_META, "r", encoding="utf-8") as fh:
+                data = json.load(fh)
+                if data.get("name") == APP_NAME:
+                    return True
+        except (json.JSONDecodeError, OSError):
+            pass
+    return False
+
 STYLE_SHEET = f"""
 * {{
     font-family: "Segoe UI Variable Text", "SF Pro Text", "Segoe UI", "SF Pro Display", sans-serif;
 }}
-QMainWindow#AnimaHub, QDialog#InstallerDlg {{ background: transparent; }}
+QMainWindow#StickaHub, QDialog#InstallerDlg {{ background: transparent; }}
 #GlassRoot {{
     background-color: transparent;
     border: none;
@@ -1257,9 +1274,9 @@ class InstallerDialog(QDialog):
         QApplication.processEvents()
 
     def _source_payload(self) -> Path | None:
-        """Folder that contains AnimaEngine.exe + _internal (or script dir in dev)."""
+        """Folder that contains StickaEngine.exe + _internal (or script dir in dev)."""
         if _is_frozen():
-            # Running from dist/AnimaEngine/AnimaEngine.exe
+            # Running from dist/StickaEngine/StickaEngine.exe
             return Path(sys.executable).resolve().parent
         # Dev: prefer already-built dist
         dist = Path(__file__).resolve().parent / "dist" / APP_NAME
@@ -1301,9 +1318,9 @@ class InstallerDialog(QDialog):
         if src is None:
             self.status.setText(
                 "No se encontró el paquete compilado.\n"
-                "Compila con PyInstaller primero (dist/AnimaEngine)."
+                "Compila con PyInstaller primero (dist/StickaEngine)."
             )
-            self._set_progress(0, "Falta dist/AnimaEngine")
+            self._set_progress(0, "Falta dist/StickaEngine")
             return
 
         self.action_btn.setEnabled(False)
@@ -1349,10 +1366,10 @@ class InstallerDialog(QDialog):
 # Main hub
 # ---------------------------------------------------------------------------
 
-class AnimaEngineHub(QMainWindow):
+class StickaEngineHub(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setObjectName("AnimaHub")
+        self.setObjectName("StickaHub")
         self.setWindowTitle(APP_NAME)
         self.setFixedSize(WINDOW_W, WINDOW_H)
         self.setWindowFlags(
@@ -2325,7 +2342,17 @@ def main() -> int:
     app.setOrganizationName(APP_NAME)
     app.setStyle("Fusion")
     ensure_data_dir()
-    hub = AnimaEngineHub()
+    # Verificar si está instalado
+    if not _is_installed():
+        from PyQt6.QtWidgets import QMessageBox
+        msg = QMessageBox()
+        msg.setWindowTitle(f"{APP_NAME} - No instalado")
+        msg.setText(f"{APP_NAME} debe estar instalado para ejecutarse.\n\nPor favor, ejecuta el instalador primero.")
+        msg.setStandardButtons(QMessageBox.StandardButton.Ok)
+        msg.exec()
+        return 1
+    
+    hub = StickaEngineHub()
     hub.show()
     return app.exec()
 
